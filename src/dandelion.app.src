@@ -1,15 +1,15 @@
 {application, dandelion,
- [{description, "An OTP application"},
+ [{description, "copies messages at a certain rate"},
   {vsn, "0.1.0"},
   {registered, []},
   {mod, {dandelion_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    brod
    ]},
   {env,[]},
   {modules, []},
-
   {licenses, ["Apache-2.0"]},
   {links, []}
  ]}.
