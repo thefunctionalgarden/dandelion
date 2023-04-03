@@ -19,10 +19,11 @@
 %% API functions
 %% ====================================================================
 -export([
+         start/7,
          start_traffic/5,
          stop_traffic/0,
          pause_traffic/0,
-         process_messages/5,
+         process_messages/3,
          set_conf/2
         ]).
 
@@ -31,6 +32,10 @@
         handle_message/4
         ]).
 
+
+start(Client, GroupId, Topics, GroupConfig, ConsumerConfig, CbModule, CbInitArg) ->
+    brod_group_subscriber:start_link(Client, GroupId, Topics, GroupConfig,
+           ConsumerConfig, CbModule, CbInitArg).
 
 init(GroupId, MessageType) ->
     init_conf(),
@@ -41,7 +46,7 @@ init(GroupId, MessageType) ->
     }.
 
 
-start_traffic(SourceTopic, TargetTopic, ApplicationGroupId, NumberOfMessages, ProduceUniformMPS) ->
+start_traffic(SourceTopic, TargetTopic, _ApplicationGroupId, _NumberOfMessages, ProduceUniformMPS) ->
     ?log_info("~p:~p - starting traffic from API", [?MODULE, ?LINE]),
 
     set_conf(control, ok),
@@ -55,6 +60,7 @@ start_traffic(SourceTopic, TargetTopic, ApplicationGroupId, NumberOfMessages, Pr
     %% set the offset to Highwatermark - NumberOfMessages 
 
     %% dynamic params
+    set_conf(target_topic, TargetTopic),
     set_conf({produce_uniform_mps, TargetTopic}, ProduceUniformMPS),
     
     %% initialize the topic producer
@@ -66,14 +72,14 @@ start_traffic(SourceTopic, TargetTopic, ApplicationGroupId, NumberOfMessages, Pr
     ok.
 
 
-handle_message(Topic, Partition, #kafka_message{messages = Messages} = Message, State) ->
-    ok = process_message(dandelion_brod_client, Topic, Partition, Message),
+handle_message(_SourceTopic, Partition, #kafka_message{} = Message, State) ->
+    ok = process_messages(dandelion_brod_client, Partition, Message),
     {ok, ack, State};
-handle_message(Topic, Partition, #kafka_message_set{} = MessageSet,
+handle_message(_SourceTopic, Partition, #kafka_message_set{} = MessageSet,
                #state{ message_type = message_set} = State
     ) ->
     % #kafka_message_set{messages = Messages} = MessageSet,
-    process_messages(dandelion_brod_client, Partition, TargetTopic, FetchedElements),
+    process_messages(dandelion_brod_client, Partition, MessageSet),
     {ok, ack, State}.
 
 
@@ -114,7 +120,7 @@ set_conf(ConfName, ConfValue) ->
 %% -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
 
-process_messages(ClientId, Partition, TargetTopic, FetchedElements) ->
+process_messages(ClientId, Partition, FetchedMessages) ->
     
 %%     #{
 %%       number_of_messages := NumberOfMessages, 
@@ -127,7 +133,7 @@ process_messages(ClientId, Partition, TargetTopic, FetchedElements) ->
     Control = get_conf(control),
     Resp = case Control of
         ok ->
-            produce_uniform(ClientId, TargetTopic, Partition, FetchedElements),
+            produce_uniform(ClientId, Partition, FetchedMessages),
             ok;
         pause -> pause;
         stop -> stop;
@@ -136,35 +142,37 @@ process_messages(ClientId, Partition, TargetTopic, FetchedElements) ->
     Resp.
 
 
-produce_uniform(ClientId, TargetTopic, Partition, FetchedElements) ->
-    ProduceUniformMPS = get_conf({produce_uniform_mps, TargetTopic}),
+produce_uniform(ClientId, Partition, FetchedMessages) ->
     Control = get_conf(control),
-    FetchedElementsNum = length(FetchedElements),
+    TargetTopic = get_conf(target_topic),
+    ProduceUniformMPS = get_conf({produce_uniform_mps, TargetTopic}),
+    FetchedMessagesNum = length(FetchedMessages),
     ?log_info("~p:~p - processing...  uniform rate: ~p.  target topic: ~p.  partition: ~p.  batch size: ~p.", 
-              [?MODULE, ?LINE, ProduceUniformMPS, TargetTopic, Partition, FetchedElementsNum]),
+              [?MODULE, ?LINE, ProduceUniformMPS, TargetTopic, Partition, FetchedMessagesNum]),
 
     %% divide the fetched element list in 10 lists almost equal in size, and produce each list
     %% this is to produce at a smoother rate 
-    FetchedBatchSize = FetchedElementsNum div 10,
+    FetchedBatchSize = FetchedMessagesNum div 10,
     lists:foldl(
-        fun(BatchSize, FetchedElementsToProcess) ->
-            {FetchedElementsHeaders, FetchedElementsRemaining} = lists:split(BatchSize, FetchedElementsToProcess),
+        fun(BatchSize, FetchedMessagesToProcess) ->
+            {_FetchedMessagesHeaders, FetchedMessagesRemaining} = lists:split(BatchSize, FetchedMessagesToProcess),
             case Control of
                 ok ->
-                    Batch = [{K1, V1}, {K2, V2}, {<<>>, [{K3, V3}]}],
-                    brod:produce_no_ack(ClientId, TargetTopic, Partition, <<>>, Batch),
+                    % Batch = [{K1, V1}, {K2, V2}, {<<>>, [{K3, V3}]}],
+                    % brod:produce_no_ack(ClientId, TargetTopic, Partition, <<>>, Batch),
+                    brod:produce_no_ack(ClientId, TargetTopic, Partition, <<>>, FetchedMessagesToProcess),
                     timer:sleep(BatchSize * 1000 div ProduceUniformMPS);
                 _Other ->
                     %% Control not ok, skip production
                     true
             end,
-            FetchedElementsRemaining
+            FetchedMessagesRemaining
         end,
-        FetchedElements,
+        FetchedMessages,
         [FetchedBatchSize, FetchedBatchSize, FetchedBatchSize,
          FetchedBatchSize, FetchedBatchSize, FetchedBatchSize,
          FetchedBatchSize, FetchedBatchSize, FetchedBatchSize,
-         FetchedBatchSize + (FetchedElementsNum rem 10)]
+         FetchedBatchSize + (FetchedMessagesNum rem 10)]
     ),
     
 %%     %% produce the batch as it arrives.  too rustic
