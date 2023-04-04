@@ -1,50 +1,61 @@
 -module(dandelion_server).
--behaviour(brod_group_subscriber).
+-behaviour(brod_group_subscriber_v2).
 
 -include_lib("brod/include/brod.hrl"). %% needed for the #kafka_message record definition
 -include("../include/log.hrl").
 
 
+%  Behavioural functions
 -export([
-    start/3
-]).
-
--export([
+    start/3,
     init/2,
-    handle_message/4
+    handle_message/2
 ]).
-
-
-start(ClientId, GroupId, ControlTopic) ->
-    %% commit offsets to kafka every 5 seconds
-    GroupConfig = [{offset_commit_policy, commit_to_kafka_v2},
-                   {offset_commit_interval_seconds, 5}
-                  ],
-    ConsumerConfig = [{begin_offset, earliest}],
-    brod:start_link_group_subscriber(ClientId, GroupId, [ControlTopic],
-                                     GroupConfig, ConsumerConfig,
-                                     _CallbackModule  = ?MODULE,
-                                     _CallbackInitArg = []).
 
 
 %% ====================================================================
 %% Behavioural functions
 %% ====================================================================
 
+start(ClientId, GroupId, ControlTopic) ->
+    %% commit offsets to kafka every 5 seconds
+    GroupConfig = [{offset_commit_policy, commit_to_kafka_v2},
+                   {offset_commit_interval_seconds, 5}
+                  ],
+    ConsumerConfig = [{begin_offset, latest}],
+    GroupSubscriberConfig = #{
+        client          => ClientId,
+        group_id        => GroupId,
+        topics          => [ControlTopic],
+        cb_module       => ?MODULE,
+        init_data       => [],
+        message_type    => message,
+        consumer_config => ConsumerConfig,
+        group_config    => GroupConfig
+    },
+    brod:start_link_group_subscriber_v2(GroupSubscriberConfig).
+
+
 %% brod_group_subscriber behaviour callback
-init(GroupId, []) ->
+init(#{
+        group_id   := GroupId,
+        topic      := _ControlTopic,
+        partition  := _Partition,
+        commit_fun := _CommitFun
+    }, []) ->
     ?log_info("~p:~p - starting traffic server", [?MODULE, ?LINE]),
     {ok, #{
         group_id => GroupId
         }
     }.
 
+
 %% brod_group_subscriber behaviour callback
-handle_message(_SourceTopic, _Partition, #kafka_message{} = Message, State) ->
+handle_message(#kafka_message{} = Message, State) ->
     NewState = process_control_messages([Message], State),
     {ok, ack, NewState};
 
-handle_message(_SourceTopic, _Partition, #kafka_message_set{} = MessageSet, State) ->
+handle_message(#kafka_message_set{} = MessageSet, State) ->
     % #kafka_message_set{messages = Messages} = MessageSet,
     NewState = process_control_messages(MessageSet, State),
     {ok, ack, NewState}.
@@ -73,8 +84,47 @@ process_control_messages(Messages, State) ->
             Messages),
     NewState.
     
+%% -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
 process_control_message(
+    #{
+      <<"params">> := ParamsMap
+     },
+     State
+  ) ->
+      %TODO search the correct sim, by equalizing ApplicationGroupId and GroupId
+  
+      #{
+          <<"source_topic">> := SourceTopicStr,
+          <<"target_topic">> := TargetTopicStr,
+          <<"application_group_id">> := ApplicationGroupId,
+          <<"produce_uniform_mps_global">> := ProduceUniformMPSGlobalStr,
+          <<"number_of_messages">> := NumberOfMessages
+          } = ParamsMap,
+    
+        % SourceTopic = string:lexemes(SourceTopicStr, ", "),
+        
+        %% aprox number of Messages per second for each partition
+        NumOfPartitions = brod:get_partitions_count(dandelion_brod_client, SourceTopicStr),
+        ProduceUniformMPS = (binary_to_integer(ProduceUniformMPSGlobalStr) div NumOfPartitions) + 1,
+    
+    
+        ?log_info("~p:~p     - SourceTopic:             ~p", [?MODULE, ?LINE, SourceTopicStr]),
+        ?log_info("~p:~p     - TargetTopic:             ~p", [?MODULE, ?LINE, TargetTopicStr]),
+        ?log_info("~p:~p     - ApplicationGroupId:      ~p", [?MODULE, ?LINE, ApplicationGroupId]),
+        ?log_info("~p:~p     - Partitions:              ~p", [?MODULE, ?LINE, NumOfPartitions]),
+        ?log_info("~p:~p     - ProduceUniformMPSGlobal: ~p", [?MODULE, ?LINE, ProduceUniformMPSGlobalStr]),
+        ?log_info("~p:~p     - ProduceUniformMPS /part: ~w", [?MODULE, ?LINE, ProduceUniformMPS]),
+        ?log_info("~p:~p     - NumberOfMessages:        ~p", [?MODULE, ?LINE, NumberOfMessages]),
+        
+        %%   (((  dynamic params setting here  )))   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        dandelion:set_conf({produce_uniform_mps, TargetTopicStr}, ProduceUniformMPS),
+  
+        State2   = maps:merge(State, ParamsMap),
+        NewState = maps:put(<<"produce_uniform_mps">>, ProduceUniformMPS, State2),
+        NewState;
+  
+  process_control_message(
     #{
         <<"application_group_id">> := _ApplicationGroupId, 
         <<"command">>              := <<"start">> 
@@ -130,52 +180,10 @@ process_control_message(
     NewState = maps:put(state, <<"paused">>, State),
     NewState;
 
-process_control_message(
-  #{
-    <<"params">> := ParamsMap
-   },
-   State
-) ->
-    %TODO search the correct sim, by equalizing ApplicationGroupId and GroupId
-
-    #{
-        <<"source_topic">> := SourceTopicStr,
-        <<"target_topic">> := TargetTopicStr,
-        <<"application_group_id">> := ApplicationGroupId,
-        <<"produce_uniform_mps_global">> := ProduceUniformMPSGlobalStr,
-        <<"number_of_messages">> := NumberOfMessages
-        } = ParamsMap,
-  
-      % SourceTopic = string:lexemes(SourceTopicStr, ", "),
-      
-      %% aprox number of Messages per second for each partition
-      NumOfPartitions = brod:get_partitions_count(dandelion_brod_client, SourceTopicStr),
-      ProduceUniformMPS = (binary_to_integer(ProduceUniformMPSGlobalStr) div NumOfPartitions) + 1,
-  
-  
-      ?log_info("~p:~p     - SourceTopic:             ~p", [?MODULE, ?LINE, SourceTopicStr]),
-      ?log_info("~p:~p     - TargetTopic:             ~p", [?MODULE, ?LINE, TargetTopicStr]),
-      ?log_info("~p:~p     - ApplicationGroupId:      ~p", [?MODULE, ?LINE, ApplicationGroupId]),
-      ?log_info("~p:~p     - Partitions:              ~p", [?MODULE, ?LINE, NumOfPartitions]),
-      ?log_info("~p:~p     - ProduceUniformMPSGlobal: ~p", [?MODULE, ?LINE, ProduceUniformMPSGlobalStr]),
-      ?log_info("~p:~p     - ProduceUniformMPS /part: ~w", [?MODULE, ?LINE, ProduceUniformMPS]),
-      ?log_info("~p:~p     - NumberOfMessages:        ~p", [?MODULE, ?LINE, NumberOfMessages]),
-      
-      %%   (((  dynamic params setting here  )))   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-      dandelion:set_conf({produce_uniform_mps, TargetTopicStr}, ProduceUniformMPS),
-
-      State2   = maps:merge(State, ParamsMap),
-      NewState = maps:put(<<"produce_uniform_mps">>, ProduceUniformMPS, State2),
-      NewState;
-
 process_control_message(UnexpectedMessage, State) ->
     ?log_error("~p:~p - Unexpected Message from control topic: ~p", [?MODULE, ?LINE, UnexpectedMessage]),
     State.
     
 
-
-
 %% -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
-
-
 

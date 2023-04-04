@@ -1,5 +1,5 @@
 -module(dandelion).
--behaviour(brod_group_subscriber).
+-behaviour(brod_group_subscriber_v2).
 
 -include_lib("_build/default/lib/brod/include/brod_int.hrl").
 -include_lib("_build/default/lib/brod/include/brod.hrl").
@@ -7,44 +7,84 @@
 -include("../include/log.hrl").
 
 
--record(state, { group_id :: binary()
-               , offset_dir :: file:fd()
-               , message_type  :: message | message_set
-               , handlers = [] :: [{{brod:topic(), brod:partition()}, pid()}]
-               }).
+% -record(state, { group_id :: binary()
+%                , offset_dir :: file:fd()
+%                , message_type  :: message | message_set
+%                , handlers = [] :: [{{brod:topic(), brod:partition()}, pid()}]
+%                }).
 
+
+-export([
+         set_conf/2,
+         start_traffic/5,
+         stop_traffic/0,
+         pause_traffic/0
+        ]).
+
+% Behaviour functions
+-export([
+        start/3,
+        init/2,
+        handle_message/2
+        ]).
+
+
+%% ====================================================================
+%% Behavioural functions
+%% ====================================================================
+
+start(ClientId, GroupId, Topics) ->
+    GroupConfig = [],
+    ConsumerConfig = [{begin_offset, earliest}],
+    GroupSubscriberConfig = #{
+        client          => ClientId,
+        group_id        => GroupId,
+        topics          => Topics,
+        cb_module       => ?MODULE,
+        init_data       => [],
+        message_type    => message_set,
+        consumer_config => ConsumerConfig,
+        group_config    => GroupConfig
+    },
+    brod:start_link_group_subscriber_v2(GroupSubscriberConfig).
+
+
+
+%% brod_group_subscriber behaviour callback
+init(#{
+        group_id   := GroupId,
+        topic      := SourceTopic,
+        partition  := Partition,
+        commit_fun := _CommitFun
+    }, []) ->
+    ?log_info("~p:~p - starting dandelion session", [?MODULE, ?LINE]),
+    init_conf(),
+    {ok, #{
+        group_id     => GroupId,
+        source_topic => SourceTopic,
+        partition    => Partition
+        }
+    }.
+
+
+%% brod_group_subscriber behaviour callback
+handle_message(#kafka_message{} = Message,
+               #{partition := Partition} = State
+    ) ->
+    process_messages(dandelion_brod_client, Partition, Message),
+    {ok, ack, State};
+
+handle_message(#kafka_message_set{} = MessageSet,
+               #{partition := Partition} = State
+    ) ->
+    % #kafka_message_set{messages = Messages} = MessageSet,
+    process_messages(dandelion_brod_client, Partition, MessageSet),
+    {ok, ack, State}.
 
 
 %% ====================================================================
 %% API functions
 %% ====================================================================
--export([
-         start/7,
-         start_traffic/5,
-         stop_traffic/0,
-         pause_traffic/0,
-         process_messages/3,
-         set_conf/2
-        ]).
-
--export([
-        init/2,
-        handle_message/4
-        ]).
-
-
-start(Client, GroupId, Topics, GroupConfig, ConsumerConfig, CbModule, CbInitArg) ->
-    brod_group_subscriber:start_link(Client, GroupId, Topics, GroupConfig,
-           ConsumerConfig, CbModule, CbInitArg).
-
-init(GroupId, MessageType) ->
-    init_conf(),
-    {ok, #state{
-        group_id = GroupId,
-        message_type = MessageType
-        }
-    }.
-
 
 start_traffic(SourceTopic, TargetTopic, _ApplicationGroupId, _NumberOfMessages, ProduceUniformMPS) ->
     ?log_info("~p:~p - starting traffic from API", [?MODULE, ?LINE]),
@@ -72,17 +112,6 @@ start_traffic(SourceTopic, TargetTopic, _ApplicationGroupId, _NumberOfMessages, 
     ok.
 
 
-handle_message(_SourceTopic, Partition, #kafka_message{} = Message, State) ->
-    ok = process_messages(dandelion_brod_client, Partition, Message),
-    {ok, ack, State};
-handle_message(_SourceTopic, Partition, #kafka_message_set{} = MessageSet,
-               #state{ message_type = message_set} = State
-    ) ->
-    % #kafka_message_set{messages = Messages} = MessageSet,
-    process_messages(dandelion_brod_client, Partition, MessageSet),
-    {ok, ack, State}.
-
-
 stop_traffic() ->
     set_conf(control, stop),
     ok.
@@ -93,11 +122,6 @@ pause_traffic() ->
     ok.
 
     
-
-%% ====================================================================
-%% Internal functions
-%% ====================================================================
-
 
 init_conf() ->
     TableName = sim_conf_table,
