@@ -1,7 +1,6 @@
 -module(dandelion).
 -behaviour(brod_group_subscriber_v2).
 
--include_lib("_build/default/lib/brod/include/brod_int.hrl").
 -include_lib("_build/default/lib/brod/include/brod.hrl").
 -include_lib("_build/default/lib/kafka_protocol/include/kpro_public.hrl").
 -include("../include/log.hrl").
